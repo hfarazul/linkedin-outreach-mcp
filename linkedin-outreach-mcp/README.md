@@ -410,6 +410,98 @@ All data is stored locally in SQLite:
 
 ---
 
+## Automation
+
+The MCP server includes a standalone runner that can execute sequence actions automatically, without requiring Claude Code interaction.
+
+### Option 1: Claude Code Hook (Recommended)
+
+Automatically run outreach actions when you start a Claude Code session.
+
+**Quick Setup:**
+```bash
+./setup-hook.sh
+```
+
+**Manual Setup:**
+
+Add to `~/.claude/settings.json`:
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /path/to/linkedin-outreach-mcp/dist/runner.js 2>&1 | head -50"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+### Option 2: Cron Job
+
+Run outreach on a schedule (e.g., daily at 9am).
+
+**macOS/Linux:**
+```bash
+crontab -e
+```
+
+Add this line:
+```
+0 9 * * * cd /path/to/linkedin-outreach-mcp && source .env && node dist/runner.js >> ~/.claude/outreach.log 2>&1
+```
+
+**Alternative with inline env vars:**
+```
+0 9 * * * UNIPILE_API_KEY='xxx' UNIPILE_DSN='xxx' UNIPILE_ACCOUNT_ID='xxx' node /path/to/dist/runner.js >> ~/.claude/outreach.log 2>&1
+```
+
+### Option 3: Manual Execution
+
+Run the outreach runner manually whenever you want:
+
+```bash
+# Production (requires build first)
+npm run runner
+
+# Development (no build needed)
+npm run runner:dev
+```
+
+### Runner Output
+
+```
+LinkedIn Outreach Runner - 2026-01-21 09:00:00
+================================================
+Checking for new connections...
+  Found 2 new connection(s)
+
+Running sequence actions...
+  ✓ John Doe - send_message
+  ✓ Jane Smith - send_invitation
+  ⏭ Bob Wilson - Daily limit reached
+
+Summary
+-------
+  Successful: 2
+  Failed: 0
+  Skipped: 1
+
+Rate Limits
+-----------
+  Invitations: 15/40
+  Messages: 5/80
+  Profile Views: 10/90
+```
+
+---
+
 ## Troubleshooting
 
 ### "Unipile not configured"

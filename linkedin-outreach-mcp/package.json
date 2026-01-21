@@ -8,6 +8,8 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
+    "runner": "node dist/runner.js",
+    "runner:dev": "tsx src/runner.ts",
     "test": "vitest"
   },
   "keywords": ["mcp", "linkedin", "outreach", "unipile"],
