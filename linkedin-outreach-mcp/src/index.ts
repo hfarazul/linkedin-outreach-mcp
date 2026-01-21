@@ -1,0 +1,1204 @@
+#!/usr/bin/env node
+/**
+ * LinkedIn Outreach MCP Server
+ * Provides tools for LinkedIn automation via Unipile API
+ */
+
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import {
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
+  Tool,
+} from '@modelcontextprotocol/sdk/types.js';
+
+import * as unipile from './unipile-client.js';
+import * as db from './db/schema.js';
+
+// Rate limits configuration
+const RATE_LIMITS = {
+  invitation: { daily: 40, weekly: 180 },  // Conservative limits
+  message: { daily: 80 },
+  profile_view: { daily: 90 },
+  post_action: { daily: 50 },
+  search: { daily: 20 },
+};
+
+// Create MCP server
+const server = new Server(
+  {
+    name: 'linkedin-outreach',
+    version: '1.0.0',
+  },
+  {
+    capabilities: {
+      tools: {},
+    },
+  }
+);
+
+// ============ Tool Definitions ============
+
+const tools: Tool[] = [
+  // Search Tools
+  {
+    name: 'search_linkedin',
+    description: 'Search LinkedIn for prospects by criteria. Returns profiles matching the search.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        url: {
+          type: 'string',
+          description: 'LinkedIn search URL (copy from browser). If provided, other params are ignored.',
+        },
+        keywords: {
+          type: 'string',
+          description: 'Keywords to search for (name, title, skills, etc.)',
+        },
+        title: {
+          type: 'string',
+          description: 'Job title to filter by',
+        },
+        company: {
+          type: 'string',
+          description: 'Company name to filter by',
+        },
+        location: {
+          type: 'string',
+          description: 'Location to filter by',
+        },
+        save_results: {
+          type: 'boolean',
+          description: 'Whether to save results as prospects (default: true)',
+          default: true,
+        },
+        source_tag: {
+          type: 'string',
+          description: 'Tag to identify this search batch (e.g., "SF CTOs Jan 2025")',
+        },
+      },
+    },
+  },
+  {
+    name: 'get_profile',
+    description: 'Get detailed profile information for a LinkedIn user',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        identifier: {
+          type: 'string',
+          description: 'LinkedIn profile URL, public identifier (e.g., "johndoe"), or provider ID',
+        },
+      },
+      required: ['identifier'],
+    },
+  },
+
+  // Prospect Management
+  {
+    name: 'get_prospects',
+    description: 'Get saved prospects with optional filters',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        source_search: {
+          type: 'string',
+          description: 'Filter by source search tag',
+        },
+        is_connection: {
+          type: 'boolean',
+          description: 'Filter by connection status',
+        },
+        not_enrolled: {
+          type: 'boolean',
+          description: 'Only show prospects not enrolled in any sequence',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum number to return (default: 50)',
+          default: 50,
+        },
+      },
+    },
+  },
+  {
+    name: 'update_prospect',
+    description: 'Update a prospect with tags or notes',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        prospect_id: {
+          type: 'string',
+          description: 'Prospect ID to update',
+        },
+        tags: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Tags to add to the prospect',
+        },
+        notes: {
+          type: 'string',
+          description: 'Notes about this prospect',
+        },
+      },
+      required: ['prospect_id'],
+    },
+  },
+
+  // Invitations & Connections
+  {
+    name: 'send_invitation',
+    description: 'Send a LinkedIn connection invitation to a prospect. Requires the prospect to be saved first.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        prospect_id: {
+          type: 'string',
+          description: 'Prospect ID (from saved prospects)',
+        },
+        message: {
+          type: 'string',
+          description: 'Connection request message (max 300 chars). Use {{first_name}} for personalization.',
+        },
+      },
+      required: ['prospect_id'],
+    },
+  },
+  {
+    name: 'check_new_connections',
+    description: 'Check for new accepted connections and update sequence enrollments accordingly',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  // Note: list_sent_invitations removed - Unipile API doesn't support this endpoint
+
+  // Messaging
+  {
+    name: 'send_message',
+    description: 'Send a message to a connected LinkedIn user',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        prospect_id: {
+          type: 'string',
+          description: 'Prospect ID (must be a connection)',
+        },
+        message: {
+          type: 'string',
+          description: 'Message text. Use {{first_name}}, {{company}} for personalization.',
+        },
+      },
+      required: ['prospect_id', 'message'],
+    },
+  },
+
+  // Sequence Management
+  {
+    name: 'create_sequence',
+    description: 'Create a new outreach sequence (campaign)',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: {
+          type: 'string',
+          description: 'Name of the sequence',
+        },
+        description: {
+          type: 'string',
+          description: 'Description of the sequence purpose',
+        },
+        steps: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              type: {
+                type: 'string',
+                enum: ['visit_profile', 'send_invitation', 'wait_for_acceptance', 'send_message', 'send_followup', 'delay'],
+              },
+              delay_days: {
+                type: 'number',
+                description: 'Days to wait before this step',
+              },
+              timeout_days: {
+                type: 'number',
+                description: 'For wait_for_acceptance: days to wait before giving up',
+              },
+              message: {
+                type: 'string',
+                description: 'Message template (supports {{first_name}}, {{company}}, etc.)',
+              },
+            },
+            required: ['type'],
+          },
+          description: 'Steps in the sequence',
+        },
+      },
+      required: ['name', 'steps'],
+    },
+  },
+  {
+    name: 'list_sequences',
+    description: 'List all outreach sequences',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        status: {
+          type: 'string',
+          enum: ['draft', 'active', 'paused', 'completed'],
+          description: 'Filter by status',
+        },
+      },
+    },
+  },
+  {
+    name: 'activate_sequence',
+    description: 'Activate a draft sequence to start running',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sequence_id: {
+          type: 'string',
+          description: 'Sequence ID to activate',
+        },
+      },
+      required: ['sequence_id'],
+    },
+  },
+  {
+    name: 'pause_sequence',
+    description: 'Pause an active sequence',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sequence_id: {
+          type: 'string',
+          description: 'Sequence ID to pause',
+        },
+      },
+      required: ['sequence_id'],
+    },
+  },
+  {
+    name: 'enroll_prospects',
+    description: 'Enroll prospects into a sequence',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sequence_id: {
+          type: 'string',
+          description: 'Sequence ID to enroll into',
+        },
+        prospect_ids: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Array of prospect IDs to enroll',
+        },
+        source_search: {
+          type: 'string',
+          description: 'Alternatively, enroll all prospects from a search tag',
+        },
+      },
+      required: ['sequence_id'],
+    },
+  },
+  {
+    name: 'run_sequence_actions',
+    description: 'Execute pending sequence actions (respects rate limits)',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sequence_id: {
+          type: 'string',
+          description: 'Run actions for a specific sequence only',
+        },
+        max_actions: {
+          type: 'number',
+          description: 'Maximum actions to run (default: 10)',
+          default: 10,
+        },
+      },
+    },
+  },
+  {
+    name: 'get_sequence_status',
+    description: 'Get status and metrics for a sequence',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sequence_id: {
+          type: 'string',
+          description: 'Sequence ID to get status for',
+        },
+      },
+      required: ['sequence_id'],
+    },
+  },
+
+  // Rate Limits & Dashboard
+  {
+    name: 'get_daily_limits',
+    description: 'Get current rate limit usage for today',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'get_action_history',
+    description: 'Get recent action history',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action_type: {
+          type: 'string',
+          description: 'Filter by action type (invitation_sent, message_sent, etc.)',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum number to return (default: 50)',
+          default: 50,
+        },
+      },
+    },
+  },
+];
+
+// ============ Tool Handlers ============
+
+// Helper: Check rate limit
+function checkRateLimit(actionType: keyof typeof RATE_LIMITS): { allowed: boolean; current: number; limit: number; message?: string } {
+  const limits = RATE_LIMITS[actionType];
+  const dailyCount = db.getRateLimitCount(actionType);
+
+  if (dailyCount >= limits.daily) {
+    return {
+      allowed: false,
+      current: dailyCount,
+      limit: limits.daily,
+      message: `Daily limit reached for ${actionType}: ${dailyCount}/${limits.daily}`,
+    };
+  }
+
+  if ('weekly' in limits) {
+    const weeklyCount = db.getWeeklyRateLimitCount(actionType);
+    if (weeklyCount >= limits.weekly) {
+      return {
+        allowed: false,
+        current: weeklyCount,
+        limit: limits.weekly,
+        message: `Weekly limit reached for ${actionType}: ${weeklyCount}/${limits.weekly}`,
+      };
+    }
+  }
+
+  return { allowed: true, current: dailyCount, limit: limits.daily };
+}
+
+// Helper: Personalize message
+function personalizeMessage(template: string, prospect: db.Prospect): string {
+  return template
+    .replace(/\{\{first_name\}\}/g, prospect.first_name || prospect.full_name.split(' ')[0])
+    .replace(/\{\{last_name\}\}/g, prospect.last_name || '')
+    .replace(/\{\{full_name\}\}/g, prospect.full_name)
+    .replace(/\{\{company\}\}/g, prospect.company || 'your company')
+    .replace(/\{\{headline\}\}/g, prospect.headline || '');
+}
+
+// Helper: Get account ID
+function getAccountId(): string {
+  const accountId = unipile.getAccountId();
+  if (!accountId) {
+    throw new Error('UNIPILE_ACCOUNT_ID environment variable not set');
+  }
+  return accountId;
+}
+
+// Tool handler implementations
+async function handleSearchLinkedin(args: Record<string, unknown>): Promise<unknown> {
+  const limitCheck = checkRateLimit('search');
+  if (!limitCheck.allowed) {
+    return { error: limitCheck.message, rate_limit: limitCheck };
+  }
+
+  const accountId = getAccountId();
+
+  try {
+    const results = await unipile.searchLinkedIn(accountId, {
+      url: args.url as string | undefined,
+      keywords: args.keywords as string | undefined,
+      title: args.title as string | undefined,
+      company: args.company as string | undefined,
+      location: args.location as string | undefined,
+    });
+
+    db.incrementRateLimit('search');
+
+    const saveResults = args.save_results !== false;
+    const sourceTag = args.source_tag as string || `search_${new Date().toISOString().split('T')[0]}`;
+
+    const savedProspects: db.Prospect[] = [];
+
+    if (saveResults && results.items) {
+      for (const item of results.items) {
+        const prospect = db.saveProspect({
+          linkedin_id: item.provider_id,
+          public_identifier: item.public_identifier,
+          full_name: item.full_name,
+          first_name: item.first_name,
+          last_name: item.last_name,
+          headline: item.headline,
+          company: item.current_company,
+          location: item.location,
+          profile_url: item.profile_url,
+          picture_url: item.picture_url,
+          connection_degree: item.connection_degree,
+          source_search: sourceTag,
+        });
+        savedProspects.push(prospect);
+      }
+    }
+
+    db.logAction({
+      action_type: 'search',
+      payload: { args },
+      response: { count: results.items?.length || 0 },
+      status: 'success',
+    });
+
+    return {
+      count: results.items?.length || 0,
+      saved_count: savedProspects.length,
+      source_tag: sourceTag,
+      prospects: savedProspects.slice(0, 10).map(p => ({
+        id: p.id,
+        name: p.full_name,
+        headline: p.headline,
+        company: p.company,
+      })),
+      has_more: results.has_more,
+      cursor: results.cursor,
+    };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    db.logAction({
+      action_type: 'search',
+      payload: { args },
+      status: 'failed',
+      error_message: errorMessage,
+    });
+    throw error;
+  }
+}
+
+async function handleGetProfile(args: Record<string, unknown>): Promise<unknown> {
+  const limitCheck = checkRateLimit('profile_view');
+  if (!limitCheck.allowed) {
+    return { error: limitCheck.message, rate_limit: limitCheck };
+  }
+
+  const accountId = getAccountId();
+  const identifier = args.identifier as string;
+
+  try {
+    const profile = await unipile.getProfile(accountId, identifier);
+    db.incrementRateLimit('profile_view');
+
+    // Save/update in database
+    const prospect = db.saveProspect({
+      linkedin_id: profile.provider_id,
+      public_identifier: profile.public_identifier,
+      full_name: profile.full_name,
+      first_name: profile.first_name,
+      last_name: profile.last_name,
+      headline: profile.headline,
+      company: profile.current_company,
+      location: profile.location,
+      profile_url: profile.profile_url,
+      picture_url: profile.picture_url,
+      connection_degree: profile.connection_degree,
+      is_connection: profile.is_connection,
+    });
+
+    return {
+      prospect_id: prospect.id,
+      ...profile,
+    };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    db.logAction({
+      action_type: 'profile_view',
+      payload: { identifier },
+      status: 'failed',
+      error_message: errorMessage,
+    });
+    throw error;
+  }
+}
+
+async function handleGetProspects(args: Record<string, unknown>): Promise<unknown> {
+  const prospects = db.getProspects({
+    source_search: args.source_search as string | undefined,
+    is_connection: args.is_connection as boolean | undefined,
+    has_enrollment: args.not_enrolled === true ? false : undefined,
+    limit: (args.limit as number) || 50,
+  });
+
+  return {
+    count: prospects.length,
+    prospects: prospects.map(p => ({
+      id: p.id,
+      linkedin_id: p.linkedin_id,
+      name: p.full_name,
+      headline: p.headline,
+      company: p.company,
+      location: p.location,
+      is_connection: p.is_connection,
+      source_search: p.source_search,
+      tags: p.tags,
+    })),
+  };
+}
+
+async function handleSendInvitation(args: Record<string, unknown>): Promise<unknown> {
+  const limitCheck = checkRateLimit('invitation');
+  if (!limitCheck.allowed) {
+    return { error: limitCheck.message, rate_limit: limitCheck };
+  }
+
+  const accountId = getAccountId();
+  const prospectId = args.prospect_id as string;
+  const prospect = db.getProspect(prospectId);
+
+  if (!prospect) {
+    throw new Error(`Prospect not found: ${prospectId}`);
+  }
+
+  if (prospect.is_connection) {
+    return { error: 'Already connected with this person' };
+  }
+
+  const message = args.message
+    ? personalizeMessage(args.message as string, prospect)
+    : undefined;
+
+  try {
+    const result = await unipile.sendInvitation(accountId, {
+      provider_id: prospect.linkedin_id,
+      message,
+    });
+
+    db.incrementRateLimit('invitation');
+
+    db.logAction({
+      action_type: 'invitation_sent',
+      prospect_id: prospectId,
+      payload: { message },
+      response: { ...result },
+      status: result.success ? 'success' : 'failed',
+      error_message: result.error,
+    });
+
+    return {
+      success: result.success,
+      prospect_name: prospect.full_name,
+      message_sent: message,
+      rate_limit: checkRateLimit('invitation'),
+    };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    db.logAction({
+      action_type: 'invitation_sent',
+      prospect_id: prospectId,
+      payload: { message },
+      status: 'failed',
+      error_message: errorMessage,
+    });
+    throw error;
+  }
+}
+
+async function handleCheckNewConnections(_args: Record<string, unknown>): Promise<unknown> {
+  const accountId = getAccountId();
+
+  try {
+    const relations = await unipile.getRelations(accountId);
+    const newConnections: Array<{ name: string; linkedin_id: string; enrollment_updated?: boolean }> = [];
+
+    for (const relation of relations.items || []) {
+      if (!db.isKnownConnection(relation.provider_id)) {
+        db.markAsKnownConnection(relation.provider_id, relation.full_name);
+
+        // Update prospect if exists
+        const prospect = db.getProspectByLinkedInId(relation.provider_id);
+        if (prospect) {
+          db.saveProspect({
+            ...prospect,
+            is_connection: true,
+          });
+
+          // Update any enrollment
+          const enrollment = db.getEnrollmentByProspect(prospect.id);
+          if (enrollment && enrollment.status === 'in_progress') {
+            db.updateEnrollment(enrollment.id, {
+              status: 'connected',
+              last_action_at: new Date().toISOString(),
+            });
+            newConnections.push({
+              name: relation.full_name,
+              linkedin_id: relation.provider_id,
+              enrollment_updated: true,
+            });
+          } else {
+            newConnections.push({
+              name: relation.full_name,
+              linkedin_id: relation.provider_id,
+            });
+          }
+        } else {
+          newConnections.push({
+            name: relation.full_name,
+            linkedin_id: relation.provider_id,
+          });
+        }
+      }
+    }
+
+    return {
+      new_connections_count: newConnections.length,
+      new_connections: newConnections,
+    };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to check connections: ${errorMessage}`);
+  }
+}
+
+async function handleSendMessage(args: Record<string, unknown>): Promise<unknown> {
+  const limitCheck = checkRateLimit('message');
+  if (!limitCheck.allowed) {
+    return { error: limitCheck.message, rate_limit: limitCheck };
+  }
+
+  const accountId = getAccountId();
+  const prospectId = args.prospect_id as string;
+  const prospect = db.getProspect(prospectId);
+
+  if (!prospect) {
+    throw new Error(`Prospect not found: ${prospectId}`);
+  }
+
+  if (!prospect.is_connection) {
+    return { error: 'Cannot message: not connected with this person yet' };
+  }
+
+  const message = personalizeMessage(args.message as string, prospect);
+
+  try {
+    const result = await unipile.sendMessage(accountId, {
+      recipient_id: prospect.linkedin_id,
+      text: message,
+    });
+
+    db.incrementRateLimit('message');
+
+    db.logAction({
+      action_type: 'message_sent',
+      prospect_id: prospectId,
+      payload: { message },
+      response: { ...result },
+      status: result.success ? 'success' : 'failed',
+      error_message: result.error,
+    });
+
+    return {
+      success: result.success,
+      prospect_name: prospect.full_name,
+      message_sent: message,
+      rate_limit: checkRateLimit('message'),
+    };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    db.logAction({
+      action_type: 'message_sent',
+      prospect_id: prospectId,
+      payload: { message },
+      status: 'failed',
+      error_message: errorMessage,
+    });
+    throw error;
+  }
+}
+
+async function handleCreateSequence(args: Record<string, unknown>): Promise<unknown> {
+  const sequence = db.createSequence({
+    name: args.name as string,
+    description: args.description as string | undefined,
+    steps: args.steps as db.SequenceStep[],
+  });
+
+  return {
+    sequence_id: sequence.id,
+    name: sequence.name,
+    status: sequence.status,
+    steps_count: sequence.steps.length,
+  };
+}
+
+async function handleListSequences(args: Record<string, unknown>): Promise<unknown> {
+  const sequences = db.getSequences(args.status as db.Sequence['status'] | undefined);
+
+  return {
+    count: sequences.length,
+    sequences: sequences.map(s => ({
+      id: s.id,
+      name: s.name,
+      status: s.status,
+      steps_count: s.steps.length,
+      created_at: s.created_at,
+    })),
+  };
+}
+
+async function handleActivateSequence(args: Record<string, unknown>): Promise<unknown> {
+  const sequenceId = args.sequence_id as string;
+  const sequence = db.getSequence(sequenceId);
+
+  if (!sequence) {
+    throw new Error(`Sequence not found: ${sequenceId}`);
+  }
+
+  db.updateSequenceStatus(sequenceId, 'active');
+
+  return {
+    sequence_id: sequenceId,
+    name: sequence.name,
+    status: 'active',
+  };
+}
+
+async function handlePauseSequence(args: Record<string, unknown>): Promise<unknown> {
+  const sequenceId = args.sequence_id as string;
+  const sequence = db.getSequence(sequenceId);
+
+  if (!sequence) {
+    throw new Error(`Sequence not found: ${sequenceId}`);
+  }
+
+  db.updateSequenceStatus(sequenceId, 'paused');
+
+  return {
+    sequence_id: sequenceId,
+    name: sequence.name,
+    status: 'paused',
+  };
+}
+
+async function handleEnrollProspects(args: Record<string, unknown>): Promise<unknown> {
+  const sequenceId = args.sequence_id as string;
+  const sequence = db.getSequence(sequenceId);
+
+  if (!sequence) {
+    throw new Error(`Sequence not found: ${sequenceId}`);
+  }
+
+  let prospectIds: string[] = [];
+
+  if (args.prospect_ids) {
+    prospectIds = args.prospect_ids as string[];
+  } else if (args.source_search) {
+    const prospects = db.getProspects({
+      source_search: args.source_search as string,
+      has_enrollment: false,
+    });
+    prospectIds = prospects.map(p => p.id);
+  }
+
+  const enrolled: string[] = [];
+
+  for (const prospectId of prospectIds) {
+    const enrollment = db.enrollProspect(sequenceId, prospectId);
+    enrolled.push(enrollment.id);
+  }
+
+  return {
+    sequence_id: sequenceId,
+    sequence_name: sequence.name,
+    enrolled_count: enrolled.length,
+    enrollment_ids: enrolled.slice(0, 10),
+  };
+}
+
+async function handleRunSequenceActions(args: Record<string, unknown>): Promise<unknown> {
+  const maxActions = (args.max_actions as number) || 10;
+  const sequenceId = args.sequence_id as string | undefined;
+
+  // Get enrollments due for action
+  const enrollments = db.getEnrollments({
+    sequence_id: sequenceId,
+    due_for_action: true,
+    limit: maxActions,
+  });
+
+  const results: Array<{
+    enrollment_id: string;
+    prospect_name: string;
+    action: string;
+    success: boolean;
+    error?: string;
+  }> = [];
+
+  for (const enrollment of enrollments) {
+    const prospect = db.getProspect(enrollment.prospect_id);
+    const sequence = db.getSequence(enrollment.sequence_id);
+
+    if (!prospect || !sequence) continue;
+
+    const step = sequence.steps[enrollment.current_step];
+    if (!step) {
+      db.updateEnrollment(enrollment.id, { status: 'completed' });
+      continue;
+    }
+
+    let success = false;
+    let error: string | undefined;
+
+    try {
+      switch (step.type) {
+        case 'visit_profile': {
+          const limitCheck = checkRateLimit('profile_view');
+          if (!limitCheck.allowed) {
+            error = limitCheck.message;
+            break;
+          }
+
+          // Get profile to trigger a "view" on LinkedIn
+          const profileResult = await handleGetProfile({
+            identifier: prospect.linkedin_id || prospect.public_identifier || prospect.id,
+          }) as { success?: boolean; error?: string };
+
+          success = !profileResult.error;
+          error = profileResult.error;
+
+          if (success) {
+            const nextStep = enrollment.current_step + 1;
+            db.updateEnrollment(enrollment.id, {
+              current_step: nextStep,
+              status: 'in_progress',
+              last_action_at: new Date().toISOString(),
+              next_action_at: step.delay_days
+                ? new Date(Date.now() + step.delay_days * 24 * 60 * 60 * 1000).toISOString()
+                : new Date().toISOString(),
+            });
+
+            // Log the profile view
+            db.logAction({
+              enrollment_id: enrollment.id,
+              prospect_id: prospect.id,
+              action_type: 'profile_view',
+              step_index: enrollment.current_step,
+              status: 'success',
+            });
+          }
+          break;
+        }
+
+        case 'send_invitation': {
+          const limitCheck = checkRateLimit('invitation');
+          if (!limitCheck.allowed) {
+            error = limitCheck.message;
+            break;
+          }
+
+          const result = await handleSendInvitation({
+            prospect_id: prospect.id,
+            message: step.message,
+          }) as { success?: boolean; error?: string };
+
+          success = result.success === true;
+          error = result.error;
+
+          if (success) {
+            db.updateEnrollment(enrollment.id, {
+              current_step: enrollment.current_step + 1,
+              status: 'in_progress',
+              last_action_at: new Date().toISOString(),
+              next_action_at: step.delay_days
+                ? new Date(Date.now() + step.delay_days * 24 * 60 * 60 * 1000).toISOString()
+                : new Date().toISOString(),
+            });
+          }
+          break;
+        }
+
+        case 'wait_for_acceptance': {
+          // Check if already connected
+          if (prospect.is_connection) {
+            success = true;
+            db.updateEnrollment(enrollment.id, {
+              current_step: enrollment.current_step + 1,
+              status: 'connected',
+              last_action_at: new Date().toISOString(),
+            });
+          } else {
+            // Check timeout
+            const enrolledAt = new Date(enrollment.created_at).getTime();
+            const timeoutMs = (step.timeout_days || 7) * 24 * 60 * 60 * 1000;
+
+            if (Date.now() - enrolledAt > timeoutMs) {
+              error = 'Timeout waiting for acceptance';
+              db.updateEnrollment(enrollment.id, { status: 'failed', error_message: error });
+            } else {
+              // Still waiting, reschedule check
+              db.updateEnrollment(enrollment.id, {
+                next_action_at: new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString(), // Check again in 8 hours
+              });
+              success = true; // Not failed, just waiting
+            }
+          }
+          break;
+        }
+
+        case 'send_message':
+        case 'send_followup': {
+          const limitCheck = checkRateLimit('message');
+          if (!limitCheck.allowed) {
+            error = limitCheck.message;
+            break;
+          }
+
+          if (!prospect.is_connection) {
+            error = 'Not connected yet';
+            break;
+          }
+
+          const result = await handleSendMessage({
+            prospect_id: prospect.id,
+            message: step.message || 'Thanks for connecting!',
+          }) as { success?: boolean; error?: string };
+
+          success = result.success === true;
+          error = result.error;
+
+          if (success) {
+            const nextStep = enrollment.current_step + 1;
+            const isComplete = nextStep >= sequence.steps.length;
+
+            db.updateEnrollment(enrollment.id, {
+              current_step: nextStep,
+              status: isComplete ? 'completed' : 'in_progress',
+              last_action_at: new Date().toISOString(),
+              next_action_at: !isComplete && step.delay_days
+                ? new Date(Date.now() + step.delay_days * 24 * 60 * 60 * 1000).toISOString()
+                : undefined,
+            });
+          }
+          break;
+        }
+
+        case 'delay': {
+          // Just advance to next step after delay
+          const nextStep = enrollment.current_step + 1;
+          db.updateEnrollment(enrollment.id, {
+            current_step: nextStep,
+            next_action_at: step.delay_days
+              ? new Date(Date.now() + step.delay_days * 24 * 60 * 60 * 1000).toISOString()
+              : new Date().toISOString(),
+          });
+          success = true;
+          break;
+        }
+
+        default:
+          error = `Unknown step type: ${step.type}`;
+      }
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    }
+
+    results.push({
+      enrollment_id: enrollment.id,
+      prospect_name: prospect.full_name,
+      action: step.type,
+      success,
+      error,
+    });
+  }
+
+  return {
+    actions_run: results.length,
+    results,
+    rate_limits: {
+      invitation: checkRateLimit('invitation'),
+      message: checkRateLimit('message'),
+    },
+  };
+}
+
+async function handleGetSequenceStatus(args: Record<string, unknown>): Promise<unknown> {
+  const sequenceId = args.sequence_id as string;
+  const sequence = db.getSequence(sequenceId);
+
+  if (!sequence) {
+    throw new Error(`Sequence not found: ${sequenceId}`);
+  }
+
+  const enrollments = db.getEnrollments({ sequence_id: sequenceId });
+
+  const statusCounts: Record<string, number> = {};
+  for (const e of enrollments) {
+    statusCounts[e.status] = (statusCounts[e.status] || 0) + 1;
+  }
+
+  return {
+    sequence_id: sequenceId,
+    name: sequence.name,
+    status: sequence.status,
+    total_enrolled: enrollments.length,
+    by_status: statusCounts,
+    steps: sequence.steps.map((s, i) => ({
+      index: i,
+      type: s.type,
+      message_preview: s.message?.substring(0, 50),
+    })),
+  };
+}
+
+async function handleGetDailyLimits(_args: Record<string, unknown>): Promise<unknown> {
+  return {
+    invitation: {
+      used_today: db.getRateLimitCount('invitation'),
+      limit_daily: RATE_LIMITS.invitation.daily,
+      used_this_week: db.getWeeklyRateLimitCount('invitation'),
+      limit_weekly: RATE_LIMITS.invitation.weekly,
+    },
+    message: {
+      used_today: db.getRateLimitCount('message'),
+      limit_daily: RATE_LIMITS.message.daily,
+    },
+    profile_view: {
+      used_today: db.getRateLimitCount('profile_view'),
+      limit_daily: RATE_LIMITS.profile_view.daily,
+    },
+    search: {
+      used_today: db.getRateLimitCount('search'),
+      limit_daily: RATE_LIMITS.search.daily,
+    },
+  };
+}
+
+async function handleGetActionHistory(args: Record<string, unknown>): Promise<unknown> {
+  const actions = db.getRecentActions(
+    args.action_type as string | undefined,
+    (args.limit as number) || 50
+  );
+
+  return {
+    count: actions.length,
+    actions: actions.map(a => ({
+      id: a.id,
+      type: a.action_type,
+      status: a.status,
+      error: a.error_message,
+      created_at: a.created_at,
+    })),
+  };
+}
+
+// Tool dispatcher
+const toolHandlers: Record<string, (args: Record<string, unknown>) => Promise<unknown>> = {
+  search_linkedin: handleSearchLinkedin,
+  get_profile: handleGetProfile,
+  get_prospects: handleGetProspects,
+  update_prospect: async (args) => {
+    const prospect = db.getProspect(args.prospect_id as string);
+    if (!prospect) throw new Error('Prospect not found');
+    // Update via saveProspect
+    return db.saveProspect({
+      ...prospect,
+      tags: args.tags as string[] | undefined ?? prospect.tags,
+      notes: args.notes as string | undefined ?? prospect.notes,
+    });
+  },
+  send_invitation: handleSendInvitation,
+  check_new_connections: handleCheckNewConnections,
+  // list_sent_invitations removed - endpoint not available
+  send_message: handleSendMessage,
+  create_sequence: handleCreateSequence,
+  list_sequences: handleListSequences,
+  activate_sequence: handleActivateSequence,
+  pause_sequence: handlePauseSequence,
+  enroll_prospects: handleEnrollProspects,
+  run_sequence_actions: handleRunSequenceActions,
+  get_sequence_status: handleGetSequenceStatus,
+  get_daily_limits: handleGetDailyLimits,
+  get_action_history: handleGetActionHistory,
+};
+
+// ============ MCP Server Setup ============
+
+// List available tools
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+  return { tools };
+});
+
+// Handle tool calls
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const { name, arguments: args } = request.params;
+
+  const handler = toolHandlers[name];
+  if (!handler) {
+    throw new Error(`Unknown tool: ${name}`);
+  }
+
+  // Check if Unipile is configured
+  if (!unipile.isConfigured()) {
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            error: 'Unipile not configured. Set UNIPILE_API_KEY and UNIPILE_DSN environment variables.',
+          }),
+        },
+      ],
+    };
+  }
+
+  try {
+    const result = await handler(args || {});
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(result, null, 2),
+        },
+      ],
+    };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({ error: errorMessage }),
+        },
+      ],
+      isError: true,
+    };
+  }
+});
+
+// Start server
+async function main() {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  console.error('LinkedIn Outreach MCP Server running on stdio');
+}
+
+main().catch((error) => {
+  console.error('Fatal error:', error);
+  process.exit(1);
+});
