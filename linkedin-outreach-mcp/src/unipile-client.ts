@@ -444,6 +444,16 @@ export async function getUserPosts(
   return apiRequest<PostsResponse>('GET', `/users/${userId}/posts?${params.toString()}`);
 }
 
+export async function getPost(
+  accountId: string,
+  postId: string
+): Promise<Post> {
+  const params = new URLSearchParams();
+  params.set('account_id', accountId);
+
+  return apiRequest<Post>('GET', `/posts/${postId}?${params.toString()}`);
+}
+
 export interface CreatePostParams {
   text: string;
 }

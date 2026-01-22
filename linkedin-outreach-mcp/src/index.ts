@@ -399,6 +399,41 @@ const tools: Tool[] = [
       required: ['chat_id'],
     },
   },
+
+  // Posts
+  {
+    name: 'get_user_posts',
+    description: 'Get recent posts from a LinkedIn user. Use this to check if someone is posting about hiring, company updates, etc.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        user_id: {
+          type: 'string',
+          description: 'LinkedIn user ID (provider_id/linkedin_id from prospect)',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum number of posts to return (default: 10)',
+          default: 10,
+        },
+      },
+      required: ['user_id'],
+    },
+  },
+  {
+    name: 'get_post',
+    description: 'Get details of a specific LinkedIn post',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        post_id: {
+          type: 'string',
+          description: 'Post ID to retrieve',
+        },
+      },
+      required: ['post_id'],
+    },
+  },
 ];
 
 // ============ Tool Handlers ============
@@ -1188,6 +1223,58 @@ async function handleGetChatMessages(args: Record<string, unknown>): Promise<unk
   };
 }
 
+async function handleGetUserPosts(args: Record<string, unknown>): Promise<unknown> {
+  const accountId = getAccountId();
+  const userId = args.user_id as string;
+
+  if (!userId) {
+    throw new Error('user_id is required');
+  }
+
+  const result = await unipile.getUserPosts(accountId, userId);
+
+  const limit = (args.limit as number) || 10;
+  const posts = result.items.slice(0, limit);
+
+  return {
+    user_id: userId,
+    count: posts.length,
+    posts: posts.map(p => ({
+      id: p.id,
+      social_id: p.social_id,
+      author_name: p.author_name,
+      text: p.text?.substring(0, 500),
+      posted_at: p.posted_at,
+      likes_count: p.likes_count || 0,
+      comments_count: p.comments_count || 0,
+      shares_count: p.shares_count || 0,
+    })),
+  };
+}
+
+async function handleGetPost(args: Record<string, unknown>): Promise<unknown> {
+  const accountId = getAccountId();
+  const postId = args.post_id as string;
+
+  if (!postId) {
+    throw new Error('post_id is required');
+  }
+
+  const post = await unipile.getPost(accountId, postId);
+
+  return {
+    id: post.id,
+    social_id: post.social_id,
+    author_id: post.author_id,
+    author_name: post.author_name,
+    text: post.text,
+    posted_at: post.posted_at,
+    likes_count: post.likes_count || 0,
+    comments_count: post.comments_count || 0,
+    shares_count: post.shares_count || 0,
+  };
+}
+
 // Tool dispatcher
 const toolHandlers: Record<string, (args: Record<string, unknown>) => Promise<unknown>> = {
   search_linkedin: handleSearchLinkedin,
@@ -1218,6 +1305,8 @@ const toolHandlers: Record<string, (args: Record<string, unknown>) => Promise<un
   get_action_history: handleGetActionHistory,
   get_chats: handleGetChats,
   get_chat_messages: handleGetChatMessages,
+  get_user_posts: handleGetUserPosts,
+  get_post: handleGetPost,
 };
 
 // ============ MCP Server Setup ============

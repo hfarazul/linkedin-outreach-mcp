@@ -84,7 +84,7 @@ Search Request → Unipile API → Prospects saved to DB
 
 | File | Purpose |
 |------|---------|
-| `src/index.ts` | MCP server + 16 tool implementations |
+| `src/index.ts` | MCP server + 18 tool implementations |
 | `src/unipile-client.ts` | Unipile REST API wrapper |
 | `src/db/schema.ts` | SQLite database operations |
 | `outreach.db` | Local database (created on first run) |
@@ -367,6 +367,13 @@ Would you like me to draft replies?
 | `send_message` | Message a connection | `prospect_id`, `message` |
 | `get_chats` | Get recent inbox conversations | `limit` (default: 20) |
 | `get_chat_messages` | Get messages from a chat | `chat_id`, `limit` (default: 20) |
+
+### Posts & Activity
+
+| Tool | Description | Parameters |
+|------|-------------|------------|
+| `get_user_posts` | Get recent posts from a user | `user_id` (linkedin_id), `limit` (default: 10) |
+| `get_post` | Get details of a specific post | `post_id` |
 
 ### Sequences (Campaigns)
 
