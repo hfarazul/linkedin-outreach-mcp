@@ -142,6 +142,30 @@ Check for new connections. For anyone who accepted, send a follow-up
 message asking about their biggest automation challenge.
 ```
 
+### Check Inbox & Reply
+
+```
+Check my recent LinkedIn messages and help me reply to any conversations
+that need responses.
+```
+
+Claude will:
+1. Fetch your recent inbox conversations
+2. Show unread messages and who they're from
+3. Display conversation history for context
+4. Help draft personalized replies
+5. Send replies on your approval
+
+Example:
+```
+Found 2 conversations needing attention:
+
+1. Preeti (Trigma) - Asking for portfolio/rate card after your call
+2. Abhinav - Responded positively to your outreach
+
+Want me to draft replies?
+```
+
 ---
 
 ## ICP Templates

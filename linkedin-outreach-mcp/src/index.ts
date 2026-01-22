@@ -364,6 +364,41 @@ const tools: Tool[] = [
       },
     },
   },
+
+  // Messaging
+  {
+    name: 'get_chats',
+    description: 'Get recent LinkedIn chat conversations (inbox)',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        limit: {
+          type: 'number',
+          description: 'Maximum number of chats to return (default: 20)',
+          default: 20,
+        },
+      },
+    },
+  },
+  {
+    name: 'get_chat_messages',
+    description: 'Get messages from a specific chat conversation',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        chat_id: {
+          type: 'string',
+          description: 'Chat ID to get messages from',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum number of messages to return (default: 20)',
+          default: 20,
+        },
+      },
+      required: ['chat_id'],
+    },
+  },
 ];
 
 // ============ Tool Handlers ============
@@ -1107,6 +1142,52 @@ async function handleGetActionHistory(args: Record<string, unknown>): Promise<un
   };
 }
 
+async function handleGetChats(args: Record<string, unknown>): Promise<unknown> {
+  const accountId = getAccountId();
+  const result = await unipile.getChats(accountId);
+
+  const limit = (args.limit as number) || 20;
+  const chats = result.items.slice(0, limit);
+
+  return {
+    count: chats.length,
+    chats: chats.map(c => ({
+      id: c.id,
+      participant_name: c.participant_name,
+      participant_id: c.participant_id,
+      last_message: c.last_message?.substring(0, 100),
+      last_message_at: c.last_message_at,
+      unread_count: c.unread_count || 0,
+    })),
+  };
+}
+
+async function handleGetChatMessages(args: Record<string, unknown>): Promise<unknown> {
+  const accountId = getAccountId();
+  const chatId = args.chat_id as string;
+
+  if (!chatId) {
+    throw new Error('chat_id is required');
+  }
+
+  const result = await unipile.getChatMessages(accountId, chatId);
+
+  const limit = (args.limit as number) || 20;
+  const messages = result.items.slice(0, limit);
+
+  return {
+    chat_id: chatId,
+    count: messages.length,
+    messages: messages.map(m => ({
+      id: m.id,
+      sender_name: m.sender_name,
+      text: m.text,
+      sent_at: m.sent_at,
+      is_outgoing: m.is_outgoing,
+    })),
+  };
+}
+
 // Tool dispatcher
 const toolHandlers: Record<string, (args: Record<string, unknown>) => Promise<unknown>> = {
   search_linkedin: handleSearchLinkedin,
@@ -1135,6 +1216,8 @@ const toolHandlers: Record<string, (args: Record<string, unknown>) => Promise<un
   get_sequence_status: handleGetSequenceStatus,
   get_daily_limits: handleGetDailyLimits,
   get_action_history: handleGetActionHistory,
+  get_chats: handleGetChats,
+  get_chat_messages: handleGetChatMessages,
 };
 
 // ============ MCP Server Setup ============

@@ -316,6 +316,37 @@ Today's Usage:
 
 ---
 
+### Example 7: Check Messages and Reply
+
+**You say:**
+```
+Check my recent LinkedIn messages and help me reply to any that need responses
+```
+
+**Claude does:**
+- Fetches your recent inbox conversations via `get_chats`
+- Identifies unread messages or conversations needing replies
+- Shows you the message history for each
+- Drafts personalized replies based on context
+- Sends replies via `send_message`
+
+**Example output:**
+```
+Found 10 conversations:
+
+1. Preeti (Trigma) - 🔴 Unread
+   "...we would appreciate it if you could share your portfolio..."
+   → Business lead asking for materials
+
+2. Abhinav Chetan - 💬 Replied to your outreach
+   "Hey Haque, nice to connect with you, would love to chat..."
+   → Positive response, opportunity to continue
+
+Would you like me to draft replies?
+```
+
+---
+
 ## Available Tools
 
 ### Search & Profiles
@@ -334,6 +365,8 @@ Today's Usage:
 | `send_invitation` | Send connection request | `prospect_id`, `message` (max 300 chars) |
 | `check_new_connections` | Detect accepted invites | (none) |
 | `send_message` | Message a connection | `prospect_id`, `message` |
+| `get_chats` | Get recent inbox conversations | `limit` (default: 20) |
+| `get_chat_messages` | Get messages from a chat | `chat_id`, `limit` (default: 20) |
 
 ### Sequences (Campaigns)
 
