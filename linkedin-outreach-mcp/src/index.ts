@@ -22,6 +22,7 @@ const RATE_LIMITS = {
   profile_view: { daily: 90 },
   post_action: { daily: 50 },
   search: { daily: 20 },
+  inmail: { daily: 25 },  // InMail credits are precious, be conservative
 };
 
 // Create MCP server
@@ -76,7 +77,157 @@ const tools: Tool[] = [
           type: 'string',
           description: 'Tag to identify this search batch (e.g., "SF CTOs Jan 2025")',
         },
+        // Advanced filters
+        api_type: {
+          type: 'string',
+          enum: ['classic', 'sales_navigator', 'recruiter'],
+          description: 'LinkedIn API to use (default: classic). sales_navigator and recruiter require subscriptions.',
+        },
+        network_distance: {
+          type: 'array',
+          items: { type: 'number', enum: [1, 2, 3] },
+          description: 'Filter by connection degree: 1 (1st), 2 (2nd), 3 (3rd+)',
+        },
+        tenure_min: {
+          type: 'number',
+          description: 'Minimum years at current company',
+        },
+        tenure_max: {
+          type: 'number',
+          description: 'Maximum years at current company',
+        },
+        company_size: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Company size codes: A=1, B=2-10, C=11-50, D=51-200, E=201-500, F=501-1000, G=1001-5000, H=5001-10000, I=10001+',
+        },
+        profile_language: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Filter by profile language (e.g., ["en", "es"])',
+        },
       },
+    },
+  },
+  {
+    name: 'search_companies',
+    description: 'Search LinkedIn for companies by criteria. Returns company profiles with industry, size, and job openings info.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        url: {
+          type: 'string',
+          description: 'LinkedIn company search URL (copy from browser). If provided, other params are ignored.',
+        },
+        keywords: {
+          type: 'string',
+          description: 'Company name or industry keywords',
+        },
+        location: {
+          type: 'string',
+          description: 'Location to filter by',
+        },
+        industry: {
+          type: 'string',
+          description: 'Industry to filter by',
+        },
+        has_job_offers: {
+          type: 'boolean',
+          description: 'Only show companies with active job postings',
+        },
+        company_size: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Company size codes: A=1, B=2-10, C=11-50, D=51-200, E=201-500, F=501-1000, G=1001-5000, H=5001-10000, I=10001+',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum number of results (default: 10)',
+          default: 10,
+        },
+      },
+    },
+  },
+  {
+    name: 'search_jobs',
+    description: 'Search LinkedIn for job postings. Returns job listings with company, location, and posting details.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        url: {
+          type: 'string',
+          description: 'LinkedIn job search URL (copy from browser). If provided, other params are ignored.',
+        },
+        keywords: {
+          type: 'string',
+          description: 'Job title or skills keywords',
+        },
+        location: {
+          type: 'string',
+          description: 'Location to filter by',
+        },
+        company: {
+          type: 'string',
+          description: 'Company name to filter by',
+        },
+        job_type: {
+          type: 'string',
+          enum: ['full_time', 'part_time', 'contract', 'internship'],
+          description: 'Type of employment',
+        },
+        experience_level: {
+          type: 'string',
+          enum: ['entry', 'associate', 'mid_senior', 'director', 'executive'],
+          description: 'Required experience level',
+        },
+        remote: {
+          type: 'boolean',
+          description: 'Filter for remote jobs only',
+        },
+        posted_within: {
+          type: 'string',
+          enum: ['day', 'week', 'month'],
+          description: 'Only show jobs posted within this timeframe',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum number of results (default: 10)',
+          default: 10,
+        },
+      },
+    },
+  },
+  {
+    name: 'get_company_profile',
+    description: 'Get detailed company profile including industry, employee count, website, description, and specialties.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        identifier: {
+          type: 'string',
+          description: 'Company LinkedIn URL, public identifier (e.g., "google"), or company ID',
+        },
+      },
+      required: ['identifier'],
+    },
+  },
+  {
+    name: 'get_search_parameters',
+    description: 'Get LinkedIn search parameter IDs for locations, industries, companies, schools, or skills. Use these IDs for advanced filtering.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        type: {
+          type: 'string',
+          enum: ['LOCATION', 'INDUSTRY', 'COMPANY', 'SCHOOL', 'SKILL'],
+          description: 'Type of parameter to search for',
+        },
+        keywords: {
+          type: 'string',
+          description: 'Keywords to search for (e.g., "San Francisco" for LOCATION, "Software" for INDUSTRY)',
+        },
+      },
+      required: ['type', 'keywords'],
     },
   },
   {
@@ -434,6 +585,85 @@ const tools: Tool[] = [
       required: ['post_id'],
     },
   },
+
+  // Content Creation
+  {
+    name: 'create_post',
+    description: 'Create a new LinkedIn post. Use this for content marketing, thought leadership, or announcements.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        text: {
+          type: 'string',
+          description: 'The post content (text). Supports LinkedIn formatting.',
+        },
+      },
+      required: ['text'],
+    },
+  },
+
+  // Profile Insights
+  {
+    name: 'get_profile_viewers',
+    description: 'Get a list of people who viewed your LinkedIn profile. Useful for identifying warm leads and engagement opportunities.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        limit: {
+          type: 'number',
+          description: 'Maximum number of viewers to return (default: 20)',
+          default: 20,
+        },
+        save_as_prospects: {
+          type: 'boolean',
+          description: 'Whether to save viewers as prospects (default: true)',
+          default: true,
+        },
+        source_tag: {
+          type: 'string',
+          description: 'Tag for saved prospects (default: "profile_viewers")',
+        },
+      },
+    },
+  },
+
+  // InMail (Sales Navigator / Recruiter)
+  {
+    name: 'send_inmail',
+    description: 'Send an InMail to a LinkedIn user (requires Sales Navigator or Recruiter). Can reach non-connections. Uses InMail credits unless recipient has an open profile.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        prospect_id: {
+          type: 'string',
+          description: 'Prospect ID to send InMail to',
+        },
+        subject: {
+          type: 'string',
+          description: 'InMail subject line (keep it compelling and concise)',
+        },
+        message: {
+          type: 'string',
+          description: 'InMail body text. Use {{first_name}}, {{company}} for personalization.',
+        },
+      },
+      required: ['prospect_id', 'subject', 'message'],
+    },
+  },
+  {
+    name: 'check_inmail_status',
+    description: 'Check if a prospect can receive InMail and whether they have an open profile (free InMail). Requires Sales Navigator.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        prospect_id: {
+          type: 'string',
+          description: 'Prospect ID to check InMail status for',
+        },
+      },
+      required: ['prospect_id'],
+    },
+  },
 ];
 
 // ============ Tool Handlers ============
@@ -502,6 +732,13 @@ async function handleSearchLinkedin(args: Record<string, unknown>): Promise<unkn
       title: args.title as string | undefined,
       company: args.company as string | undefined,
       location: args.location as string | undefined,
+      // Advanced filters
+      api: args.api_type as 'classic' | 'sales_navigator' | 'recruiter' | undefined,
+      network_distance: args.network_distance as number[] | undefined,
+      tenure_min: args.tenure_min as number | undefined,
+      tenure_max: args.tenure_max as number | undefined,
+      company_size: args.company_size as string[] | undefined,
+      profile_language: args.profile_language as string[] | undefined,
     });
 
     db.incrementRateLimit('search');
@@ -605,6 +842,182 @@ async function handleGetProfile(args: Record<string, unknown>): Promise<unknown>
       error_message: errorMessage,
     });
     throw error;
+  }
+}
+
+async function handleSearchCompanies(args: Record<string, unknown>): Promise<unknown> {
+  const limitCheck = checkRateLimit('search');
+  if (!limitCheck.allowed) {
+    return { error: limitCheck.message, rate_limit: limitCheck };
+  }
+
+  const accountId = getAccountId();
+
+  try {
+    const results = await unipile.searchCompanies(accountId, {
+      url: args.url as string | undefined,
+      keywords: args.keywords as string | undefined,
+      location: args.location as string | undefined,
+      industry: args.industry as string | undefined,
+      has_job_offers: args.has_job_offers as boolean | undefined,
+      company_size: args.company_size as string[] | undefined,
+    });
+
+    db.incrementRateLimit('search');
+
+    const limit = (args.limit as number) || 10;
+    const companies = results.items.slice(0, limit);
+
+    db.logAction({
+      action_type: 'company_search',
+      payload: { args },
+      response: { count: companies.length },
+      status: 'success',
+    });
+
+    return {
+      count: companies.length,
+      companies: companies.map(c => ({
+        id: c.id,
+        name: c.name,
+        industry: c.industry,
+        location: c.location,
+        employee_count: c.employee_count,
+        employee_range: c.employee_range,
+        website: c.website,
+        description: c.description?.substring(0, 200),
+        has_job_offers: c.has_job_offers,
+        profile_url: c.profile_url,
+      })),
+      has_more: results.has_more,
+      cursor: results.cursor,
+    };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    db.logAction({
+      action_type: 'company_search',
+      payload: { args },
+      status: 'failed',
+      error_message: errorMessage,
+    });
+    throw error;
+  }
+}
+
+async function handleSearchJobs(args: Record<string, unknown>): Promise<unknown> {
+  const limitCheck = checkRateLimit('search');
+  if (!limitCheck.allowed) {
+    return { error: limitCheck.message, rate_limit: limitCheck };
+  }
+
+  const accountId = getAccountId();
+
+  try {
+    const results = await unipile.searchJobs(accountId, {
+      url: args.url as string | undefined,
+      keywords: args.keywords as string | undefined,
+      location: args.location as string | undefined,
+      company: args.company as string | undefined,
+      job_type: args.job_type as 'full_time' | 'part_time' | 'contract' | 'internship' | undefined,
+      experience_level: args.experience_level as 'entry' | 'associate' | 'mid_senior' | 'director' | 'executive' | undefined,
+      remote: args.remote as boolean | undefined,
+      posted_within: args.posted_within as 'day' | 'week' | 'month' | undefined,
+    });
+
+    db.incrementRateLimit('search');
+
+    const limit = (args.limit as number) || 10;
+    const jobs = results.items.slice(0, limit);
+
+    db.logAction({
+      action_type: 'job_search',
+      payload: { args },
+      response: { count: jobs.length },
+      status: 'success',
+    });
+
+    return {
+      count: jobs.length,
+      jobs: jobs.map(j => ({
+        id: j.id,
+        title: j.title,
+        company_name: j.company_name,
+        location: j.location,
+        job_type: j.job_type,
+        experience_level: j.experience_level,
+        is_remote: j.is_remote,
+        posted_at: j.posted_at,
+        applicants_count: j.applicants_count,
+        job_url: j.job_url,
+        description: j.description?.substring(0, 200),
+      })),
+      has_more: results.has_more,
+      cursor: results.cursor,
+    };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    db.logAction({
+      action_type: 'job_search',
+      payload: { args },
+      status: 'failed',
+      error_message: errorMessage,
+    });
+    throw error;
+  }
+}
+
+async function handleGetCompanyProfile(args: Record<string, unknown>): Promise<unknown> {
+  const accountId = getAccountId();
+  const identifier = args.identifier as string;
+
+  try {
+    const company = await unipile.getCompanyProfile(accountId, identifier);
+
+    return {
+      id: company.id,
+      name: company.name,
+      public_identifier: company.public_identifier,
+      industry: company.industry,
+      location: company.location,
+      headquarters: company.headquarters,
+      employee_count: company.employee_count,
+      employee_range: company.employee_range,
+      website: company.website,
+      phone: company.phone,
+      description: company.description,
+      specialties: company.specialties,
+      founded_year: company.founded_year,
+      company_type: company.company_type,
+      profile_url: company.profile_url,
+      logo_url: company.logo_url,
+    };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to get company profile: ${errorMessage}`);
+  }
+}
+
+async function handleGetSearchParameters(args: Record<string, unknown>): Promise<unknown> {
+  const accountId = getAccountId();
+  const type = args.type as 'LOCATION' | 'INDUSTRY' | 'COMPANY' | 'SCHOOL' | 'SKILL';
+  const keywords = args.keywords as string;
+
+  try {
+    const params = await unipile.getSearchParameters(accountId, type, keywords);
+
+    return {
+      type,
+      keywords,
+      count: params.length,
+      parameters: params.map(p => ({
+        id: p.id,
+        name: p.name,
+        type: p.type,
+      })),
+    };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to get search parameters: ${errorMessage}`);
   }
 }
 
@@ -1156,6 +1569,14 @@ async function handleGetDailyLimits(_args: Record<string, unknown>): Promise<unk
       used_today: db.getRateLimitCount('search'),
       limit_daily: RATE_LIMITS.search.daily,
     },
+    post_action: {
+      used_today: db.getRateLimitCount('post_action'),
+      limit_daily: RATE_LIMITS.post_action.daily,
+    },
+    inmail: {
+      used_today: db.getRateLimitCount('inmail'),
+      limit_daily: RATE_LIMITS.inmail.daily,
+    },
   };
 }
 
@@ -1275,10 +1696,216 @@ async function handleGetPost(args: Record<string, unknown>): Promise<unknown> {
   };
 }
 
+async function handleCreatePost(args: Record<string, unknown>): Promise<unknown> {
+  const limitCheck = checkRateLimit('post_action');
+  if (!limitCheck.allowed) {
+    return { error: limitCheck.message, rate_limit: limitCheck };
+  }
+
+  const accountId = getAccountId();
+  const text = args.text as string;
+
+  if (!text) {
+    throw new Error('text is required');
+  }
+
+  try {
+    const result = await unipile.createPost(accountId, { text });
+
+    db.incrementRateLimit('post_action');
+
+    db.logAction({
+      action_type: 'post_created',
+      payload: { text: text.substring(0, 100) },
+      response: { ...result },
+      status: result.success ? 'success' : 'failed',
+      error_message: result.error,
+    });
+
+    return {
+      success: result.success,
+      post_id: result.post_id,
+      social_id: result.social_id,
+      text_preview: text.substring(0, 100),
+      rate_limit: checkRateLimit('post_action'),
+    };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    db.logAction({
+      action_type: 'post_created',
+      payload: { text: text.substring(0, 100) },
+      status: 'failed',
+      error_message: errorMessage,
+    });
+    throw error;
+  }
+}
+
+async function handleGetProfileViewers(args: Record<string, unknown>): Promise<unknown> {
+  const accountId = getAccountId();
+  const limit = (args.limit as number) || 20;
+  const saveAsProspects = args.save_as_prospects !== false;
+  const sourceTag = (args.source_tag as string) || 'profile_viewers';
+
+  try {
+    const result = await unipile.getProfileViewers(accountId);
+    const viewers = result.items.slice(0, limit);
+
+    const savedProspects: db.Prospect[] = [];
+
+    if (saveAsProspects) {
+      for (const viewer of viewers) {
+        if (viewer.provider_id) {
+          const prospect = db.saveProspect({
+            linkedin_id: viewer.provider_id,
+            public_identifier: viewer.public_identifier,
+            full_name: viewer.full_name,
+            headline: viewer.headline,
+            picture_url: viewer.picture_url,
+            source_search: sourceTag,
+          });
+          savedProspects.push(prospect);
+        }
+      }
+    }
+
+    db.logAction({
+      action_type: 'profile_viewers_fetched',
+      payload: { limit, save_as_prospects: saveAsProspects },
+      response: { count: viewers.length, saved: savedProspects.length },
+      status: 'success',
+    });
+
+    return {
+      count: viewers.length,
+      saved_count: savedProspects.length,
+      source_tag: saveAsProspects ? sourceTag : null,
+      viewers: viewers.map(v => ({
+        id: v.id,
+        provider_id: v.provider_id,
+        name: v.full_name,
+        headline: v.headline,
+        viewed_at: v.viewed_at,
+        prospect_id: savedProspects.find(p => p.linkedin_id === v.provider_id)?.id,
+      })),
+      has_more: result.has_more,
+    };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    db.logAction({
+      action_type: 'profile_viewers_fetched',
+      payload: { limit },
+      status: 'failed',
+      error_message: errorMessage,
+    });
+    throw error;
+  }
+}
+
+async function handleSendInMail(args: Record<string, unknown>): Promise<unknown> {
+  const limitCheck = checkRateLimit('inmail');
+  if (!limitCheck.allowed) {
+    return { error: limitCheck.message, rate_limit: limitCheck };
+  }
+
+  const accountId = getAccountId();
+  const prospectId = args.prospect_id as string;
+  const prospect = db.getProspect(prospectId);
+
+  if (!prospect) {
+    throw new Error(`Prospect not found: ${prospectId}`);
+  }
+
+  const subject = args.subject as string;
+  const message = personalizeMessage(args.message as string, prospect);
+
+  try {
+    const result = await unipile.sendInMail(accountId, {
+      recipient_id: prospect.linkedin_id,
+      subject,
+      text: message,
+    });
+
+    db.incrementRateLimit('inmail');
+
+    db.logAction({
+      action_type: 'inmail_sent',
+      prospect_id: prospectId,
+      payload: { subject, message: message.substring(0, 100) },
+      response: { ...result },
+      status: result.success ? 'success' : 'failed',
+      error_message: result.error,
+    });
+
+    return {
+      success: result.success,
+      prospect_name: prospect.full_name,
+      subject,
+      message_preview: message.substring(0, 100),
+      credits_remaining: result.credits_remaining,
+      rate_limit: checkRateLimit('inmail'),
+    };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    db.logAction({
+      action_type: 'inmail_sent',
+      prospect_id: prospectId,
+      payload: { subject, message: message.substring(0, 100) },
+      status: 'failed',
+      error_message: errorMessage,
+    });
+    throw error;
+  }
+}
+
+async function handleCheckInMailStatus(args: Record<string, unknown>): Promise<unknown> {
+  const accountId = getAccountId();
+  const prospectId = args.prospect_id as string;
+  const prospect = db.getProspect(prospectId);
+
+  if (!prospect) {
+    throw new Error(`Prospect not found: ${prospectId}`);
+  }
+
+  try {
+    const status = await unipile.checkInMailStatus(accountId, prospect.linkedin_id);
+
+    return {
+      prospect_id: prospectId,
+      prospect_name: prospect.full_name,
+      can_send_inmail: status.can_send_inmail,
+      is_open_profile: status.is_open_profile,
+      inmail_credits_required: status.inmail_credits_required,
+      recommendation: status.is_open_profile
+        ? 'Open profile - free InMail available!'
+        : status.can_send_inmail
+          ? 'Can send InMail (1 credit required)'
+          : 'InMail not available for this profile',
+    };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    // If Sales Navigator is not available, return a helpful message
+    if (errorMessage.includes('403') || errorMessage.includes('unauthorized')) {
+      return {
+        prospect_id: prospectId,
+        prospect_name: prospect.full_name,
+        error: 'Sales Navigator or Recruiter subscription required for InMail status check',
+        can_send_inmail: null,
+        is_open_profile: null,
+      };
+    }
+    throw error;
+  }
+}
+
 // Tool dispatcher
 const toolHandlers: Record<string, (args: Record<string, unknown>) => Promise<unknown>> = {
   search_linkedin: handleSearchLinkedin,
+  search_companies: handleSearchCompanies,
+  search_jobs: handleSearchJobs,
   get_profile: handleGetProfile,
+  get_company_profile: handleGetCompanyProfile,
+  get_search_parameters: handleGetSearchParameters,
   get_prospects: handleGetProspects,
   update_prospect: async (args) => {
     const prospect = db.getProspect(args.prospect_id as string);
@@ -1307,6 +1934,10 @@ const toolHandlers: Record<string, (args: Record<string, unknown>) => Promise<un
   get_chat_messages: handleGetChatMessages,
   get_user_posts: handleGetUserPosts,
   get_post: handleGetPost,
+  create_post: handleCreatePost,
+  get_profile_viewers: handleGetProfileViewers,
+  send_inmail: handleSendInMail,
+  check_inmail_status: handleCheckInMailStatus,
 };
 
 // ============ MCP Server Setup ============

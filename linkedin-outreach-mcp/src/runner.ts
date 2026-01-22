@@ -17,6 +17,8 @@ const RATE_LIMITS = {
   invitation: { daily: 40, weekly: 180 },
   message: { daily: 80 },
   profile_view: { daily: 90 },
+  post_action: { daily: 50 },
+  inmail: { daily: 25 },
 };
 
 // ANSI colors for terminal output
@@ -407,9 +409,13 @@ async function main() {
     const inviteLimit = checkRateLimit('invitation');
     const messageLimit = checkRateLimit('message');
     const viewLimit = checkRateLimit('profile_view');
+    const postLimit = { current: db.getRateLimitCount('post_action'), limit: RATE_LIMITS.post_action.daily };
+    const inmailLimit = { current: db.getRateLimitCount('inmail'), limit: RATE_LIMITS.inmail.daily };
     log(`  Invitations: ${inviteLimit.current}/${inviteLimit.limit}`);
     log(`  Messages: ${messageLimit.current}/${messageLimit.limit}`);
     log(`  Profile Views: ${viewLimit.current}/${viewLimit.limit}`);
+    log(`  Posts: ${postLimit.current}/${postLimit.limit}`);
+    log(`  InMails: ${inmailLimit.current}/${inmailLimit.limit}`);
 
     log('');
 
